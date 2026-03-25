@@ -109,7 +109,7 @@ def parse_regitra_fields(text: str) -> Dict[str, Any]:
     extract(r'\bB\s{1,10}(\d{4}-\d{2}-\d{2})', 'B')
     extract(r'\bB\.?1\s{1,10}(\d{4}-\d{2}-\d{2})', 'B1')
     extract(r'\bB\.?2\s{1,10}([\d\-/]+)', 'B2')
-    extract(r'\bD\.?1\s{1,10}([A-Z][A-Z\s]{2,20}?)(?:\n|\s{3,})', 'D1')
+    extract(r'D\.?1\s+(?:Marke)?\s*([A-Z][A-Z/\s\-]{2,30}?)(?:\n|\s{3,}|D\.?2)', 'D1')
     extract(r'\bD\.?2\s{1,10}([^\n]{3,60})', 'D2')
     extract(r'\bD\.?3\s{1,10}([^\n]{2,40})', 'D3')
     extract(r'\bE\s{1,15}([A-HJ-NPR-Z0-9]{17})\b', 'E')
@@ -131,7 +131,7 @@ def parse_regitra_fields(text: str) -> Dict[str, Any]:
     extract(r'\bP\.?3\s{1,10}([A-Za-z]{3,15})', 'P3')
     extract(r'\bP\.?4\s{1,10}(\d{3,6})', 'P4')
     extract(r'\bP\.?5\s{1,10}([^\n]{2,30})', 'P5')
-    extract(r'\bR\s{1,10}([A-Z]{3,12})\b', 'R')
+    extract(r'\bR\s{1,10}(?!Farbe|farbe|FARBE)([A-Z]{3,12})\b', 'R')
     extract(r'\bS\.?1\s{1,10}(\d{1,3})', 'S1')
     extract(r'\bS\.?2\s{1,10}(\d{1,3})', 'S2')
     extract(r'\bT\s{1,10}(\d{2,3})\b', 'T')
@@ -187,10 +187,14 @@ def is_likely_real_vin(vin):
     expected = "X" if rem == 10 else str(rem)
     if vin[8] == expected:
         return True
-    # Pirmi 2 simboliai yra skaiciai arba zинomi salies kodai
-    known_prefixes = {"WD","WM","WA","WB","WF","WV","YV","YS","XL","VF","ZC","VN","TM","SB","SA","JN","JT","KM","LB","LA"}
+    # Pirmi 2 simboliai yra zinomi salies kodai
+    known_prefixes = {"WD","WM","WA","WB","WF","WV","YV","YS","XL","VF","ZC","VN","TM","SB","SA","JN","JT","KM","LB","LA","XS","XC","TR"}
     if vin[:2] in known_prefixes:
         return True
+    # Jei vien tik skaicius - labai mazai tikimybe kad tai VIN
+    alpha_count = sum(1 for c in vin if c.isalpha())
+    if alpha_count < 3:
+        return False
     return False
 
 def find_vins_in_text(text):
