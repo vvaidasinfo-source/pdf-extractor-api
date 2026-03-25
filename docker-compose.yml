@@ -1,0 +1,17 @@
+services:
+  vin-api:
+    build: .
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # Neprivaloma: jei norite mount'inti PDF katalogą
+      # - ./pdfs:/app/pdfs
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
