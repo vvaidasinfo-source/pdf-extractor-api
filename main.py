@@ -25,14 +25,12 @@ app = FastAPI(title="VIN Extractor API", version="2.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 TRUCK_WMI = {
-    "WSM","WS9",  # Schmitz Cargobull
-    "XMC","X3F",  # Krone
-    "VLV",        # Volvo Trailers
-    "SFP","SF9",  # Schwarzmuller
-    "WJM",        # Kögel
-    "YE2",        # Wielton
-    "3H3",        # Wabash
-    "1DW",        # Utility Trailer"YV2","YV4","YS2","WMA","WDB","WDC","XLR","XLE","ZCF","VF6","XTC","1XP","2NP","1FU","3AL","1HT","1M1"}
+    "YV2","YV4","YS2","WMA","WDB","WDC","XLR","XLE","ZCF","VF6","XTC",
+    "1XP","2NP","1FU","3AL","1HT","1M1",
+    "WSM","WS9","WS1",
+    "XMC","X3F",
+    "WJM","YE2","SFP","SF9","3H3","1DW",
+}
 TRANSLITERATION = {'A':1,'B':2,'C':3,'D':4,'E':5,'F':6,'G':7,'H':8,'J':1,'K':2,'L':3,'M':4,'N':5,'P':7,'R':9,'S':2,'T':3,'U':4,'V':5,'W':6,'X':7,'Y':8,'Z':9}
 WEIGHTS = [8,7,6,5,4,3,2,10,0,9,8,7,6,5,4,3,2]
 
@@ -112,10 +110,42 @@ def _get_tesseract_lang():
     except: return "eng"
 
 def _preprocess_image(img):
-    from PIL import ImageFilter, ImageEnhance
-    img = ImageEnhance.Contrast(img).enhance(2.0)
+    from PIL import ImageFilter, ImageEnhance, ImageOps
+    # Konvertuoti i RGB
+    img = img.convert("RGB")
+    r, g, b = img.split()
+    # Regitros dokumentai - zalias fonas: sustipriname raudona kanala
+    # kuris geriausiai atskiria juoda teksta nuo zalio fono
+    img = ImageEnhance.Contrast(r).enhance(3.0)
+    img = img.convert("L")
+    # Threshold - paversti i juoda/balta
+    img = img.point(lambda x: 0 if x < 140 else 255, "1").convert("L")
     img = img.filter(ImageFilter.SHARPEN)
-    return img.convert("L")
+    return img
+
+def extract_text_with_google(pdf_bytes: bytes) -> str:
+    """Google Cloud Vision API - tiksliausias OCR variantas."""
+    import os, base64, json
+    from urllib.request import Request, urlopen
+    api_key = os.environ.get("GOOGLE_API_KEY", "")
+    if not api_key:
+        raise ValueError("GOOGLE_API_KEY nenurodytas")
+    b64 = base64.b64encode(pdf_bytes).decode()
+    payload = json.dumps({
+        "requests": [{
+            "inputConfig": {"content": b64, "mimeType": "application/pdf"},
+            "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
+            "imageContext": {"languageHints": ["lt", "en", "de", "fr", "pl", "lv", "et"]}
+        }]
+    }).encode()
+    url = "https://vision.googleapis.com/v1/files:annotate?key=" + api_key
+    req = Request(url, data=payload, headers={"Content-Type": "application/json"})
+    with urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read())
+    pages = data["responses"][0].get("responses", [])
+    texts = [p["fullTextAnnotation"]["text"] for p in pages if "fullTextAnnotation" in p]
+    return "\n".join(texts)
+
 
 def extract_text_from_pdf(pdf_bytes):
     try:
@@ -127,6 +157,19 @@ def extract_text_from_pdf(pdf_bytes):
                 return combined, "pdfplumber"
     except Exception as e:
         logger.warning("pdfplumber klaida: {}".format(e))
+
+    # 2. Google Cloud Vision (jei GOOGLE_API_KEY nurodytas)
+    import os
+    if os.environ.get("GOOGLE_API_KEY"):
+        try:
+            text = extract_text_with_google(pdf_bytes)
+            if len(text.strip()) > 50:
+                logger.info("Google Vision OCR")
+                return text, "google_vision"
+        except Exception as e:
+            logger.warning("Google OCR klaida: {}".format(e))
+
+    # 3. Tesseract fallback
     try:
         poppler_path = r"C:\poppler\Library\bin" if platform.system() == "Windows" else None
         images = convert_from_bytes(pdf_bytes, dpi=400, poppler_path=poppler_path)
