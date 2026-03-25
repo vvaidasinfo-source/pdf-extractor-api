@@ -417,3 +417,12 @@ def validate_single(vin: str):
     """
     result = validate_vin(vin)
     return SingleVinResponse(**result)
+
+
+@app.post("/debug/ocr")
+async def debug_ocr(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Not a PDF")
+    pdf_bytes = await file.read()
+    text, method = extract_text_from_pdf(pdf_bytes)
+    return {"method": method, "char_count": len(text), "raw_text": text}
