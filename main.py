@@ -172,17 +172,46 @@ def extract_vin_candidates_fuzzy(text):
                 if len(c) == 17: candidates.add(c)
     return list(candidates)
 
+def is_likely_real_vin(vin):
+    """Patikrina ar VIN atrodo realus - ne atsitiktinis teksto fragmentas."""
+    # Turi buti tik skaiciai ir raidės (ne vien raidės - tai greiciausiai tekstas)
+    digit_count = sum(1 for c in vin if c.isdigit())
+    if digit_count < 4:
+        return False
+    # Zinomas WMI - labai tikėtina kad realus
+    if vin[:3] in TRUCK_WMI:
+        return True
+    # Checksum validacija - jei atitinka, tikrai realus
+    total = sum(_transliterate(c)*WEIGHTS[i] for i,c in enumerate(vin) if _transliterate(c) is not None)
+    rem = total % 11
+    expected = "X" if rem == 10 else str(rem)
+    if vin[8] == expected:
+        return True
+    # Pirmi 2 simboliai yra skaiciai arba zинomi salies kodai
+    known_prefixes = {"WD","WM","WA","WB","WF","WV","YV","YS","XL","VF","ZC","VN","TM","SB","SA","JN","JT","KM","LB","LA"}
+    if vin[:2] in known_prefixes:
+        return True
+    return False
+
 def find_vins_in_text(text):
+    """Randa VIN kodus - tik tikrus, ne teksto fragmentus."""
     text = fix_ocr_errors(text)
     upper = text.upper()
     candidates = set()
-    for m in REGITRA_E_PATTERN.finditer(upper): candidates.add(m.group(1))
+
+    # 1. E laukas - tiksliausias
+    for m in REGITRA_E_PATTERN.finditer(upper):
+        candidates.add(m.group(1))
+
+    # 2. Tiksli paieska
     candidates.update(VIN_PATTERN.findall(upper))
-    cleaned = re.sub(r'[\s\-_]+', '', upper)
+    cleaned = re.sub(r"[\s\-_]+", "", upper)
     candidates.update(VIN_PATTERN.findall(cleaned))
-    candidates.update(extract_vin_candidates_fuzzy(cleaned))
-    logger.info("VIN kandidatai: {}".format(candidates))
-    return list(candidates)
+
+    # 3. Filtruoti - palikti tik tikrus VIN
+    real_vins = {v for v in candidates if is_likely_real_vin(v)}
+    logger.info("VIN kandidatai: {} -> tikri: {}".format(len(candidates), len(real_vins)))
+    return list(real_vins)
 
 def _get_tesseract_lang():
     try:
