@@ -1,7 +1,6 @@
 """
 VIN Extractor API v2.0
 """
-
 import re
 import io
 import logging
