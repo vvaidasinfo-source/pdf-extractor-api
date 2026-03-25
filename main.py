@@ -15,6 +15,13 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# .env failo palaikymas lokaliam naudojimui
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 if platform.system() == "Windows":
     pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
@@ -69,9 +76,20 @@ VIN_PATTERN = re.compile(r'[A-HJ-NPR-Z0-9]{17}')
 REGITRA_E_PATTERN = re.compile(r'(?:^|\s)E\s{1,15}([A-HJ-NPR-Z0-9]{17})(?:\s|$)', re.MULTILINE)
 
 def fix_ocr_errors(text):
+    # || arba |[ -> E
     text = re.sub(r'\|[\|\[]', 'E ', text)
     text = re.sub(r'\[[\|\[]', 'E ', text)
     return text
+
+def normalize_vin(vin):
+    """Taiso OCR O/0 painiojima VIN kode."""
+    # VIN negali tureti O - pakeiciame i 0 tose pozicijose kur tikimas skaicus
+    # WMI (1-3) ir serijos nr (12-17) daznai turi skaicus
+    result = list(vin)
+    for i in list(range(0,3)) + list(range(11,17)):
+        if result[i] == 'O':
+            result[i] = '0'
+    return ''.join(result)
 
 def extract_vin_candidates_fuzzy(text):
     candidates = set()
@@ -217,6 +235,7 @@ async def extract_vins(file: UploadFile = File(...), only_valid: bool = Query(Fa
     candidates = find_vins_in_text(text)
     results = []
     for vin in candidates:
+        vin = normalize_vin(vin)
         r = validate_vin(vin)
         if only_valid and not r["valid"]: continue
         if only_trucks and not r.get("decoded",{}).get("is_truck"): continue
