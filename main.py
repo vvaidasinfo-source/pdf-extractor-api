@@ -112,7 +112,7 @@ def parse_regitra_fields(text: str) -> Dict[str, Any]:
     extract(r'D\.?1\s+(?:Marke)?\s*([A-Z][A-Z/\s\-]{2,30}?)(?:\n|\s{3,}|D\.?2)', 'D1')
     extract(r'\bD\.?2\s{1,10}([^\n]{3,60})', 'D2')
     extract(r'\bD\.?3\s{1,10}([^\n]{2,40})', 'D3')
-    extract(r'\bE\s{1,15}([A-HJ-NPR-Z0-9]{17})\b', 'E')
+    extract(r'\bE\s{0,15}([A-HJ-NPR-Z0-9]{17})\b', 'E')
     extract(r'\bF\.?1\s{1,10}(\d{3,6})', 'F1')
     extract(r'\bF\.?2\s{1,10}(\d{3,6})', 'F2')
     extract(r'\bF\.?3\s{1,10}(\d{3,6})', 'F3')
@@ -172,29 +172,39 @@ def extract_vin_candidates_fuzzy(text):
                 if len(c) == 17: candidates.add(c)
     return list(candidates)
 
+KNOWN_PREFIXES_2 = {
+    "WD","WM","WA","WB","WF","WV","WS","WJ",
+    "YV","YS","YE","YW",
+    "XL","XM","XS","XC","XE","XK",
+    "VF","VN","VS","VX",
+    "ZC","ZA","ZF","ZD",
+    "TM","TR","TY",
+    "SB","SA","SC","SF",
+    "JN","JT","JA","JF","JH","JK",
+    "KM","KL","KN","KP",
+    "LB","LA","LF","LS","LV",
+    "1F","1G","1H","1J","1L","1M",
+    "2T","2G","2C","2F","2H",
+}
+
 def is_likely_real_vin(vin):
-    """Patikrina ar VIN atrodo realus - ne atsitiktinis teksto fragmentas."""
-    # Turi buti tik skaiciai ir raidės (ne vien raidės - tai greiciausiai tekstas)
     digit_count = sum(1 for c in vin if c.isdigit())
     if digit_count < 4:
         return False
-    # Zinomas WMI - labai tikėtina kad realus
+    # Zinomas WMI
     if vin[:3] in TRUCK_WMI:
         return True
-    # Checksum validacija - jei atitinka, tikrai realus
-    total = sum(_transliterate(c)*WEIGHTS[i] for i,c in enumerate(vin) if _transliterate(c) is not None)
-    rem = total % 11
-    expected = "X" if rem == 10 else str(rem)
-    if vin[8] == expected:
+    # Zinomas salies prefiksas
+    if vin[:2] in KNOWN_PREFIXES_2:
         return True
-    # Pirmi 2 simboliai yra zinomi salies kodai
-    known_prefixes = {"WD","WM","WA","WB","WF","WV","YV","YS","XL","VF","ZC","VN","TM","SB","SA","JN","JT","KM","LB","LA","XS","XC","TR"}
-    if vin[:2] in known_prefixes:
-        return True
-    # Jei vien tik skaicius - labai mazai tikimybe kad tai VIN
+    # Checksum + bent 4 raides
     alpha_count = sum(1 for c in vin if c.isalpha())
-    if alpha_count < 3:
-        return False
+    if alpha_count >= 4:
+        total = sum(_transliterate(c)*WEIGHTS[i] for i,c in enumerate(vin) if _transliterate(c) is not None)
+        rem = total % 11
+        expected = "X" if rem == 10 else str(rem)
+        if vin[8] == expected and vin[:2] not in {"EV","EX","EW","EU","ET","ES","ER","EP","EN","EM","EL","EK","EJ","EH","EG","EF","ED","EC","EB","EA"}:
+            return True
     return False
 
 def find_vins_in_text(text):
