@@ -24,7 +24,15 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="VIN Extractor API", version="2.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-TRUCK_WMI = {"YV2","YV4","YS2","WMA","WDB","WDC","XLR","XLE","ZCF","VF6","XTC","1XP","2NP","1FU","3AL","1HT","1M1"}
+TRUCK_WMI = {
+    "WSM","WS9",  # Schmitz Cargobull
+    "XMC","X3F",  # Krone
+    "VLV",        # Volvo Trailers
+    "SFP","SF9",  # Schwarzmuller
+    "WJM",        # Kögel
+    "YE2",        # Wielton
+    "3H3",        # Wabash
+    "1DW",        # Utility Trailer"YV2","YV4","YS2","WMA","WDB","WDC","XLR","XLE","ZCF","VF6","XTC","1XP","2NP","1FU","3AL","1HT","1M1"}
 TRANSLITERATION = {'A':1,'B':2,'C':3,'D':4,'E':5,'F':6,'G':7,'H':8,'J':1,'K':2,'L':3,'M':4,'N':5,'P':7,'R':9,'S':2,'T':3,'U':4,'V':5,'W':6,'X':7,'Y':8,'Z':9}
 WEIGHTS = [8,7,6,5,4,3,2,10,0,9,8,7,6,5,4,3,2]
 
