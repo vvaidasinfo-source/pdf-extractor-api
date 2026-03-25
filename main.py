@@ -426,3 +426,25 @@ async def debug_ocr(file: UploadFile = File(...)):
     pdf_bytes = await file.read()
     text, method = extract_text_from_pdf(pdf_bytes)
     return {"method": method, "char_count": len(text), "raw_text": text}
+
+
+def fix_ocr_errors(text):
+    import re
+    text = re.sub(r'\|\||\|\[|\[\|', 'E', text)
+    return text
+
+
+def extract_vin_candidates_fuzzy(text):
+    import re
+    candidates = set()
+    upper = re.sub(r"[\s]", "", text.upper())
+    for match in re.finditer(r'[A-HJ-NPR-Z0-9]{16,19}', upper):
+        seq = match.group()
+        if len(seq) == 17:
+            candidates.add(seq)
+        elif len(seq) == 18:
+            for i in range(18):
+                candidate = seq[:i] + seq[i+1:]
+                if len(candidate) == 17:
+                    candidates.add(candidate)
+    return list(candidates)
