@@ -256,30 +256,83 @@ def extract_text_with_google(pdf_bytes):
     pages = data["responses"][0].get("responses", [])
     return "\n".join(p["fullTextAnnotation"]["text"] for p in pages if "fullTextAnnotation" in p)
 
-def extract_text_from_pdf(pdf_bytes):
+AVAILABLE_ENGINES = ["auto", "pdfplumber", "google_vision", "tesseract"]
+
+def _run_pdfplumber(pdf_bytes):
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        parts = [p.extract_text() for p in pdf.pages if p.extract_text()]
+        combined = "\n".join(parts)
+        if len(combined.strip()) > 50:
+            return combined, "pdfplumber"
+    raise ValueError("pdfplumber nerado teksto")
+
+def _run_google_vision(pdf_bytes):
+    if not os.environ.get("GOOGLE_API_KEY"):
+        raise ValueError("GOOGLE_API_KEY nenurodytas aplinkoje")
+    text = extract_text_with_google(pdf_bytes)
+    if len(text.strip()) > 50:
+        return text, "google_vision"
+    raise ValueError("Google Vision negrąžino teksto")
+
+def _run_tesseract(pdf_bytes):
+    poppler_path = r"C:\poppler\Library\bin" if platform.system() == "Windows" else None
+    images = convert_from_bytes(pdf_bytes, dpi=400, poppler_path=poppler_path)
+    lang = _get_tesseract_lang()
+    parts = []
+    for i, img in enumerate(images):
+        t = pytesseract.image_to_string(_preprocess_image(img), lang=lang, config=r"--oem 3 --psm 6")
+        logger.info("Psl {} OCR: {!r}".format(i+1, t[:300]))
+        parts.append(t)
+    result = "\n".join(parts)
+    if not result.strip():
+        raise ValueError("Tesseract negrąžino teksto")
+    return result, "tesseract_ocr"
+
+def extract_text_from_pdf(pdf_bytes, engine: str = "auto"):
+    """
+    Ištraukia tekstą iš PDF.
+    engine: "auto" | "pdfplumber" | "google_vision" | "tesseract"
+    """
+    engine = engine.lower().strip()
+
+    # --- Rankinis pasirinkimas ---
+    if engine == "pdfplumber":
+        try:
+            return _run_pdfplumber(pdf_bytes)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail="pdfplumber klaida: {}".format(e))
+
+    if engine == "google_vision":
+        try:
+            return _run_google_vision(pdf_bytes)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail="Google Vision klaida: {}".format(e))
+
+    if engine == "tesseract":
+        try:
+            return _run_tesseract(pdf_bytes)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="Tesseract klaida: {}".format(e))
+
+    if engine != "auto":
+        raise HTTPException(status_code=400, detail="Nežinomas variklis '{}'. Galimi: {}".format(engine, AVAILABLE_ENGINES))
+
+    # --- Auto režimas: pdfplumber → Google Vision → Tesseract ---
     try:
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            parts = [p.extract_text() for p in pdf.pages if p.extract_text()]
-            combined = "\n".join(parts)
-            if len(combined.strip()) > 50:
-                logger.info("pdfplumber"); return combined, "pdfplumber"
-    except Exception as e: logger.warning("pdfplumber klaida: {}".format(e))
+        return _run_pdfplumber(pdf_bytes)
+    except Exception as e:
+        logger.warning("pdfplumber klaida: {}".format(e))
+
     if os.environ.get("GOOGLE_API_KEY"):
         try:
-            text = extract_text_with_google(pdf_bytes)
-            if len(text.strip()) > 50:
-                logger.info("Google Vision OCR"); return text, "google_vision"
-        except Exception as e: logger.warning("Google OCR klaida: {}".format(e))
+            return _run_google_vision(pdf_bytes)
+        except Exception as e:
+            logger.warning("Google OCR klaida: {}".format(e))
+
     try:
-        poppler_path = r"C:\poppler\Library\bin" if platform.system() == "Windows" else None
-        images = convert_from_bytes(pdf_bytes, dpi=400, poppler_path=poppler_path)
-        lang = _get_tesseract_lang()
-        parts = []
-        for i, img in enumerate(images):
-            t = pytesseract.image_to_string(_preprocess_image(img), lang=lang, config=r"--oem 3 --psm 6")
-            logger.info("Psl {} OCR: {!r}".format(i+1, t[:300])); parts.append(t)
-        return "\n".join(parts), "tesseract_ocr"
-    except Exception as e: raise HTTPException(status_code=500, detail="OCR klaida: {}".format(e))
+        return _run_tesseract(pdf_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="OCR klaida: {}".format(e))
 
 # ---------------------------------------------------------------------------
 # Models
@@ -299,6 +352,24 @@ class SingleVinResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+@app.get("/engines")
+def list_engines():
+    """Grąžina galimus OCR variklius ir jų būseną."""
+    google_ready = bool(os.environ.get("GOOGLE_API_KEY"))
+    try:
+        tesseract_ready = bool(pytesseract.get_tesseract_version())
+    except Exception:
+        tesseract_ready = False
+    return {
+        "engines": [
+            {"id": "auto",          "name": "Auto (rekomenduojama)", "available": True,           "description": "Bando pdfplumber → Google Vision → Tesseract"},
+            {"id": "pdfplumber",    "name": "pdfplumber",            "available": True,           "description": "Greitas tekstinis PDF ištraukimas, be OCR"},
+            {"id": "google_vision", "name": "Google Vision OCR",     "available": google_ready,   "description": "Debesų OCR – tikslus, reikia GOOGLE_API_KEY"},
+            {"id": "tesseract",     "name": "Tesseract OCR",         "available": tesseract_ready,"description": "Vietinis OCR – veikia be interneto"},
+        ],
+        "default": "auto"
+    }
+
 @app.get("/debug/env")
 def debug_env():
     key = os.environ.get("GOOGLE_API_KEY", "")
@@ -325,12 +396,19 @@ def health():
     return status
 
 @app.post("/extract", response_model=ExtractionResponse)
-async def extract_vins(file: UploadFile = File(...), only_valid: bool = Query(False), only_trucks: bool = Query(False)):
+async def extract_vins(
+    file: UploadFile = File(...),
+    only_valid: bool = Query(False),
+    only_trucks: bool = Query(False),
+    engine: str = Query("auto", description="OCR variklis: auto | pdfplumber | google_vision | tesseract"),
+):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Reikalingas PDF failas")
+    if engine not in AVAILABLE_ENGINES:
+        raise HTTPException(status_code=400, detail="Nežinomas variklis '{}'. Galimi: {}".format(engine, AVAILABLE_ENGINES))
     pdf_bytes = await file.read()
     if not pdf_bytes: raise HTTPException(status_code=400, detail="Tuscias failas")
-    text, method = extract_text_from_pdf(pdf_bytes)
+    text, method = extract_text_from_pdf(pdf_bytes, engine=engine)
     parsed_fields = parse_regitra_fields(text)
 
     # Pirmenybe E laukui is parsed_fields - tiksliausias saltinis
@@ -361,10 +439,15 @@ def validate_single(vin: str):
     return SingleVinResponse(**validate_vin(vin))
 
 @app.post("/debug/ocr")
-async def debug_ocr(file: UploadFile = File(...)):
+async def debug_ocr(
+    file: UploadFile = File(...),
+    engine: str = Query("auto", description="OCR variklis: auto | pdfplumber | google_vision | tesseract"),
+):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Reikalingas PDF failas")
+    if engine not in AVAILABLE_ENGINES:
+        raise HTTPException(status_code=400, detail="Nežinomas variklis \'{}\'. Galimi: {}".format(engine, AVAILABLE_ENGINES))
     pdf_bytes = await file.read()
-    text, method = extract_text_from_pdf(pdf_bytes)
+    text, method = extract_text_from_pdf(pdf_bytes, engine=engine)
     candidates = find_vins_in_text(text)
     return {"method":method,"char_count":len(text),"raw_text":text,"fixed_text":fix_ocr_errors(text),"vin_candidates_found":candidates,"parsed_fields":parse_regitra_fields(text)}
