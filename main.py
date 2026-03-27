@@ -59,95 +59,316 @@ def validate_vin(vin):
     return {"vin":vin,"valid":True,"errors":[],"warnings":warnings,"decoded":decoded}
 
 # ---------------------------------------------------------------------------
-# Regitros laukų atpažinimas
+# Universalus laukų atpažinimas (LT + DE)
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Universalus dokumento laukų atpažinimas (LT + DE)
 # ---------------------------------------------------------------------------
 FIELD_LABELS = {
     "A":"Registracijos numeris","B":"Reg. data","B1":"Reg. LT data","B2":"Modelio metai",
-    "D1":"Marke","D2":"Tipas/variantas","D3":"Modelis","E":"VIN",
-    "F1":"Max mase (kg)","F2":"Leistina mase (kg)","F3":"Junginio mase (kg)",
-    "F4":"Puspriekab. mase (kg)","F5":"Puspriekab. asiu mase (kg)",
-    "G":"Tuscia mase (kg)","H":"Galiojimo pabaiga","I":"Dokumento data",
-    "J":"Kategorija","J1":"Kebulo kodas (nac)","J2":"Kebulo kodas (ES)",
+    "D1":"Markė","D2":"Tipas/variantas","D3":"Modelis","E":"VIN",
+    "F1":"Max masė (kg)","F2":"Leistina masė (kg)","F3":"Junginio masė (kg)",
+    "F4":"Puspriekab. masė (kg)","F5":"Puspriekab. ašių masė (kg)",
+    "G":"Tuščia masė (kg)","H":"Galiojimo pabaiga","I":"Dokumento data",
+    "J":"Kategorija","J1":"Kėbulo kodas (nac)","J2":"Kėbulo kodas (ES)",
     "K":"Tipo patv. nr","K1":"Nac. patv. nr",
-    "P1":"Variklio turis (cm3)","P2":"Galia (kW)","P3":"Degalai","P4":"Sukiai","P5":"Variklio kodas",
-    "Q":"Galios/mases santykis","R":"Spalva","S1":"Sedimu vietu sk","S2":"Stovima vietu sk",
-    "T":"Max greitis (km/h)","V7":"CO2 (g/km)","V9":"Tersalu lygis","V10":"Hibridine",
+    "P1":"Variklio tūris (cm3)","P2":"Galia (kW)","P3":"Degalai","P4":"Sūkiai","P5":"Variklio kodas",
+    "Q":"Galios/masės santykis","R":"Spalva","S1":"Sėdimų vietų sk","S2":"Stovimų vietų sk",
+    "T":"Max greitis (km/h)","V7":"CO2 (g/km)","V9":"Teršalų lygis","V10":"Hibridinė",
     "C11":"Valdytojas","C12":"Valdytojo vardas","C13":"Valdytojo adresas","C14":"Valdytojo kodas",
     "C21":"Savininkas","C22":"Savininko vardas","C23":"Savininko adresas","C24":"Savininko kodas",
 }
 
-def parse_regitra_fields(text: str) -> Dict[str, Any]:
-    """Ištraukia visus Regitros dokumento laukus TIK is duomenu puslapio."""
-    fields = {}
+# Vokiški etiketių žodžiai - naudojami aptikimui ir praleidimui
+_DE_SKIP = (
+    r"(?:Amtliches\s+Kennzeichen|Datum\s+der\s+Erstzulassung|Marke|Typ|Variante|Version|"
+    r"Handelsbezeichnung|Fahrzeug.Identifizierungsnummer|Fahrzeugklasse|Farbe|"
+    r"Hubraum[^{]{0,30}|Nennleistung[^{]{0,30}|Kraftstoff|Hersteller[^\n]{0,30}|"
+    r"Name\s+oder\s+Firmenname|Vorname|Anschrift|Bezeichnung[^\n]{0,30})\s*"
+)
 
-    # Naudoti tik pirmą puslapį - sustoti ties Pastabos skyriumi
-    stop_markers = ["Pastabos", "PASTABOS", "valstybinis registracijos numeris",
-                    "pirmosios registracijos data", "gamybine marke"]
-    data_text = text
-    for marker in stop_markers:
-        idx = text.find(marker)
-        if idx > 200:  # Ignoruoti jei per anksti (gali buti antraste)
-            data_text = text[:idx]
-            break
+def detect_document_country(text: str) -> str:
+    """Nustato dokumento šalį: 'de' arba 'lt'."""
+    u = text.upper()
+    de_hits = sum(1 for kw in [
+        "ZULASSUNGSBESCHEINIGUNG", "BUNDESREPUBLIK", "FAHRZEUG",
+        "KRAFTSTOFF", "KENNZEICHEN", "HUBRAUM", "NENNLEISTUNG",
+    ] if kw in u)
+    lt_hits = sum(1 for kw in [
+        "REGISTRACIJOS LIUDIJIMAS", "REGITRA", "LIETUVOS RESPUBLIKA",
+        "EUROPOS SAJUNGA", "EUROPOS SĄJUNGA", "DYZELINAS", "DEGALAI",
+    ] if kw in u)
+    return "de" if de_hits > lt_hits else "lt"
 
-    def extract(pattern, key):
-        """Ištraukia reikšmę pagal šabloną. Tikrina kad reikšmė nėra aprašymas."""
+
+def _norm_date(val: str) -> str:
+    """DD.MM.YYYY → YYYY-MM-DD, kitus palieka."""
+    m = re.match(r'^(\d{2})\.(\d{2})\.(\d{4})$', val.strip())
+    if m:
+        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
+    return val
+
+
+def _make_extractor(fields, data_text):
+    """Grąžina extract() funkciją su bendra logika."""
+    def extract(pattern, key, transform=None):
         if key in fields:
             return
-        m = re.search(pattern, data_text, re.IGNORECASE | re.MULTILINE)
+        m = re.search(pattern, data_text, re.IGNORECASE | re.MULTILINE | re.DOTALL)
         if not m:
             return
-        val = m.group(1).strip().rstrip('-').strip()
-        # Praleisti jei tuščia arba brūkšneliai
-        if not val or val in ('--', '-', ''):
+        val = m.group(1).strip().strip('-').strip()
+        if not val or re.fullmatch(r'[-–—/\s]+', val):
             return
-        # Praleisti jei reikšmė per ilga ir atrodo kaip aprašymas (>60 simbolių su žodžiais)
-        if len(val) > 60 and ' ' in val and not any(c.isdigit() for c in val[:10]):
+        if len(val) > 80 and ' ' in val and not any(c.isdigit() for c in val[:10]):
+            return
+        if transform:
+            val = transform(val)
+        fields[key] = {"label": FIELD_LABELS.get(key, key), "value": val}
+    return extract
+
+
+def _parse_lt_fields(data_text: str) -> Dict[str, Any]:
+    """
+    Lietuviški Regitros dokumentai.
+    Veikia su nauju skaitmeniniu formatu, senu nuskaitytu ir nufotografuotu.
+    Toleruoja OCR klaidas: taškas→kablelis, dvigubi tarpai, sulieti simboliai.
+    """
+    fields: Dict[str, Any] = {}
+    x = _make_extractor(fields, data_text)
+
+    # ── A: Registracijos numeris ─────────────────────────────────────────────
+    # Naujas formatas: "A   NRE513"  Senas: "A   HF340"  Foto: OCR gali duoti "A  NSE437"
+    x(r'(?:^|\s)A\s{1,12}([A-Z]{1,4}\d{3,6})\b', 'A')
+
+    # ── B: datos ─────────────────────────────────────────────────────────────
+    # Naujame formate eilutė: "A  NRE513   I  2026-01-15   H  --"
+    # Todėl datos ieškome pagal etiketę, bet ne eilutės pradžioje
+    x(r'(?:^|\s)B\s{1,10}(\d{4}-\d{2}-\d{2})', 'B')
+    x(r'(?:^|\s)B[,.]?\.?1\s{1,10}(\d{4}-\d{2}-\d{2})', 'B1')
+    x(r'(?:^|\s)B[,.]?\.?2\s{1,10}([\d\-/]+)', 'B2')
+
+    # ── I: dokumento data (dažnai eilutėje su B.1) ───────────────────────────
+    x(r'(?:^|\s)I\s{1,10}(\d{4}-\d{2}-\d{2})', 'I')
+    x(r'(?:^|\s)H\s{1,10}(\d{4}-\d{2}-\d{2})', 'H')
+
+    # ── D.1: Markė ────────────────────────────────────────────────────────────
+    # Naujas: "D.1  MERCEDES-BENZ\n"  Senas/OCR: "D,1 VOLVO" arba "D 1  VOLVO"
+    x(r'D[,. ]?\.?1\s{1,12}([A-ZÄÖÜ][A-ZÄÖÜ0-9/\s\-]{1,35}?)(?:\n|\s{3,}|D[,. ]?\.?2)', 'D1')
+
+    # ── D.2, D.3 ─────────────────────────────────────────────────────────────
+    x(r'D[,. ]?\.?2\s{1,10}([^\n]{3,80})', 'D2')
+    x(r'D[,. ]?\.?3\s{1,10}([^\n]{2,50})', 'D3')
+
+    # ── E: VIN ───────────────────────────────────────────────────────────────
+    x(r'(?:^|\s)E\s{0,15}([A-HJ-NPR-Z0-9]{17})\b', 'E')
+
+    # ── F masės ──────────────────────────────────────────────────────────────
+    # Naujame formate "F.1  18000   F.2  --   F.3  --" viena eilutė
+    x(r'F[,.]?\.?1\s{1,10}(\d{3,6})', 'F1')
+    x(r'F[,.]?\.?2\s{1,10}(\d{3,6})', 'F2')
+    x(r'F[,.]?\.?3\s{1,10}(\d{3,6})', 'F3')
+    x(r'[(\[]?F[,.]?\.?4[)\]]?\s{1,10}(\d{3,6})', 'F4')
+    x(r'[(\[]?F[,.]?\.?5[)\]]?\s{1,10}(\d{3,6})', 'F5')
+
+    # ── G: tuščia masė ───────────────────────────────────────────────────────
+    x(r'(?:^|\s)G\s{1,10}(\d{3,6})', 'G')
+
+    # ── J: kategorija ─────────────────────────────────────────────────────────
+    x(r'(?:^|\s)J\s{1,6}([A-Z]\d)\b', 'J')
+    x(r'J[,.]?\.?1\s{1,10}([^\n]{1,25})', 'J1')
+    x(r'J[,.]?\.?2\s{1,10}([A-Z]{1,6})\b', 'J2')
+
+    # ── K: tipo patvirtinimas ─────────────────────────────────────────────────
+    x(r'(?:^|\s)K\s{1,6}([^\n]{5,60})', 'K')
+    x(r'K[,.]?\.?1\s{1,6}([^\n]{3,60})', 'K1')
+
+    # ── P: variklis ───────────────────────────────────────────────────────────
+    x(r'P[,.]?\.?1\s{1,10}(\d{3,6})', 'P1')
+    x(r'P[,.]?\.?2\s{1,10}(\d{2,5})', 'P2')
+    x(r'P[,.]?\.?3\s{1,10}([A-Za-zžščųėįūąŽŠČŲĖĮŪĄ]{3,20})', 'P3')
+    x(r'P[,.]?\.?4\s{1,10}(\d{3,6})', 'P4')
+    x(r'P[,.]?\.?5\s{1,10}([^\n]{2,35})', 'P5')
+
+    # ── R: spalva ─────────────────────────────────────────────────────────────
+    x(r'(?:^|\s)R\s{1,10}([A-ZÄÖÜ][A-ZÄÖÜA-Z]{2,15})\b', 'R')
+
+    # ── S, T, Q ───────────────────────────────────────────────────────────────
+    x(r'S[,.]?\.?1\s{1,10}(\d{1,3})', 'S1')
+    x(r'S[,.]?\.?2\s{1,10}(\d{1,3})', 'S2')
+    x(r'(?:^|\s)T\s{1,10}(\d{2,3})\b', 'T')
+    x(r'(?:^|\s)Q\s{1,10}([\d.,]+)\b', 'Q')
+
+    # ── V: emisija ────────────────────────────────────────────────────────────
+    x(r'V[,.]?\.?7\s{1,10}([^\n]{3,40})', 'V7')
+    x(r'V[,.]?\.?9\s{1,10}([^\n]{5,80})', 'V9')
+    x(r'V[,.]?\.?10\s{0,6}\)?([^\n]{1,15})', 'V10')
+
+    # ── C: valdytojas / savininkas ────────────────────────────────────────────
+    # Senas formatas: "(C.1.4) 141776948"  Naujas: žiūrima be skliaustų
+    x(r'C[,.]?\.?1[,.]?\.?1\s{1,8}([^\n]{3,80})', 'C11')
+    x(r'C[,.]?\.?1[,.]?\.?2\s{1,8}([^\n]{2,50})', 'C12')
+    x(r'C[,.]?\.?1[,.]?\.?3\s{1,8}([^\n]{3,80})', 'C13')
+    x(r'[(\[]C[,.]?\.?1[,.]?\.?4[)\]]\s{0,8}(\d{7,12})', 'C14')
+    x(r'C[,.]?\.?2[,.]?\.?1\s{1,8}([^\n]{3,80})', 'C21')
+    x(r'C[,.]?\.?2[,.]?\.?2\s{1,8}([^\n]{2,50})', 'C22')
+    x(r'C[,.]?\.?2[,.]?\.?3\s{1,8}([^\n]{3,80})', 'C23')
+    x(r'[(\[]C[,.]?\.?2[,.]?\.?4[)\]]\s{0,8}(\d{7,12})', 'C24')
+
+    return fields
+
+
+def _parse_de_fields(data_text: str) -> Dict[str, Any]:
+    """
+    Vokiški Zulassungsbescheinigung Teil I ir Teil II.
+    Nenaudoja IGNORECASE ten kur lauko kodas gali sutapti su žodžio vidumi.
+    """
+    fields: Dict[str, Any] = {}
+    FLAGS_S  = re.MULTILINE
+    FLAGS_IC = re.MULTILINE | re.IGNORECASE
+
+    def _set(key, val):
+        if key in fields or not val:
+            return
+        val = val.strip().strip("-–").strip()
+        if not val or re.fullmatch(r'[-–—/\s]+', val):
+            return
+        if len(val) > 80 and " " in val and not any(c.isdigit() for c in val[:10]):
             return
         fields[key] = {"label": FIELD_LABELS.get(key, key), "value": val}
 
-    extract(r'(?<![A-Z])A\s{1,10}([A-Z]{2,4}\d{3,6})\b', 'A')
-    extract(r'\bB\s{1,10}(\d{4}-\d{2}-\d{2})', 'B')
-    extract(r'\bB\.?1\s{1,10}(\d{4}-\d{2}-\d{2})', 'B1')
-    extract(r'\bB\.?2\s{1,10}([\d\-/]+)', 'B2')
-    extract(r'D\.?1\s+(?:Marke)?\s*([A-Z][A-Z/\s\-]{2,30}?)(?:\n|\s{3,}|D\.?2)', 'D1')
-    extract(r'\bD\.?2\s{1,10}([^\n]{3,60})', 'D2')
-    extract(r'\bD\.?3\s{1,10}([^\n]{2,40})', 'D3')
-    extract(r'\bE\s{0,15}([A-HJ-NPR-Z0-9]{17})\b', 'E')
-    extract(r'\bF\.?1\s{1,10}(\d{3,6})', 'F1')
-    extract(r'\bF\.?2\s{1,10}(\d{3,6})', 'F2')
-    extract(r'\bF\.?3\s{1,10}(\d{3,6})', 'F3')
-    extract(r'\bF\.?4\s{1,10}(\d{3,6})', 'F4')
-    extract(r'\bF\.?5\s{1,10}(\d{3,6})', 'F5')
-    extract(r'\bG\s{1,10}(\d{3,6})', 'G')
-    extract(r'\bH\s{1,10}(\d{4}-\d{2}-\d{2})', 'H')
-    extract(r'\bI\s{1,10}(\d{4}-\d{2}-\d{2})', 'I')
-    extract(r'\bJ\s{1,5}([A-Z]\d)\b', 'J')
-    extract(r'\bJ\.?1\s{1,10}([^\n]{1,20})', 'J1')
-    extract(r'\bJ\.?2\s{1,10}([A-Z]{2,6})\b', 'J2')
-    extract(r'\bK\s{1,5}([^\n]{5,50})', 'K')
-    extract(r'\bK\.?1\s{1,5}([^\n]{3,50})', 'K1')
-    extract(r'\bP\.?1\s{1,10}(\d{3,6})', 'P1')
-    extract(r'\bP\.?2\s{1,10}(\d{2,4})', 'P2')
-    extract(r'\bP\.?3\s{1,10}([A-Za-z]{3,15})', 'P3')
-    extract(r'\bP\.?4\s{1,10}(\d{3,6})', 'P4')
-    extract(r'\bP\.?5\s{1,10}([^\n]{2,30})', 'P5')
-    extract(r'\bR\s{1,10}(?!Farbe|farbe|FARBE)([A-Z]{3,12})\b', 'R')
-    extract(r'\bS\.?1\s{1,10}(\d{1,3})', 'S1')
-    extract(r'\bS\.?2\s{1,10}(\d{1,3})', 'S2')
-    extract(r'\bT\s{1,10}(\d{2,3})\b', 'T')
-    extract(r'\bV\.?7\s{1,10}([^\n]{3,30})', 'V7')
-    extract(r'\bV\.?9\s{1,10}([^\n]{5,60})', 'V9')
-    extract(r'\bV\.?10\s{0,5}\)?([^\n]{1,10})', 'V10')
-    extract(r'\bC\.?1\.?1\s{1,5}([^\n]{3,80})', 'C11')
-    extract(r'\bC\.?1\.?2\s{1,5}([^\n]{2,40})', 'C12')
-    extract(r'\bC\.?1\.?3\s{1,5}([^\n]{3,60})', 'C13')
-    extract(r'[(\[]C\.?1\.?4[)\]]\s{0,5}(\d{7,12})', 'C14')
-    extract(r'\bC\.?2\.?1\s{1,5}([^\n]{3,80})', 'C21')
-    extract(r'\bC\.?2\.?2\s{1,5}([^\n]{2,40})', 'C22')
-    extract(r'\bC\.?2\.?3\s{1,5}([^\n]{3,60})', 'C23')
-    extract(r'[(\[]C\.?2\.?4[)\]]\s{0,5}(\d{7,12})', 'C24')
+    def xs(pattern, key, transform=None, flags=FLAGS_S):
+        if key in fields:
+            return
+        m = re.search(pattern, data_text, flags)
+        if m:
+            val = m.group(1).strip()
+            if transform:
+                val = transform(val)
+            _set(key, val)
 
+    def norm_date(v):
+        m = re.match(r'(\d{2})\.(\d{2})\.(\d{4})', v.strip())
+        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else v
+
+    # A: Kennzeichen
+    xs(r'Amtliches\s+Kennzeichen\s+([A-ZÄÖÜ]{1,3}\s+[A-Z0-9]{1,8})\b', 'A')
+    if 'A' not in fields:
+        xs(r'(?:^|\n)A\s+Amtliches[^\n]{0,30}\s([A-ZÄÖÜ]{1,3}\s+[A-Z0-9]{1,8})\b', 'A')
+    if 'A' not in fields:
+        xs(r'(?:^|\n)([A-ZÄÖÜ]{1,3}\s+[A-Z]{1,2}\d{2,5})\s*(?:\n|\s{5,})', 'A')
+
+    # B: Erstzulassung
+    xs(r'Erstzulassung\s+(\d{2}\.\d{2}\.\d{4})', 'B', norm_date)
+    if 'B' not in fields:
+        xs(r'(?:^|\n)B\s+[A-Z][^\n]{0,40}\s(\d{2}\.\d{2}\.\d{4})', 'B', norm_date)
+
+    # D.1 Marke
+    xs(r'D\.?1\s+Marke\s+([A-ZÄÖÜ][A-ZÄÖÜ0-9/\s\-]{1,40}?)(?:\n|D\.?2|\s{4,})', 'D1')
+    if 'D1' not in fields:
+        xs(r'D\.?1\s+([A-ZÄÖÜ][A-ZÄÖÜ0-9/\s\-]{1,40}?)(?:\n|D\.?2|\s{4,})', 'D1')
+
+    # D.2, D.3
+    xs(r'D\.?2\s+(?:Typ\s+)?([^\n]{2,60})', 'D2', flags=FLAGS_IC)
+    xs(r'D\.?3\s+(?:Handelsbezeichnung\s+)?([^\n]{1,50})', 'D3', flags=FLAGS_IC)
+
+    # E: VIN
+    xs(r'Fahrzeug.Identifizierungsnummer\s+([A-HJ-NPR-Z0-9]{17})\b', 'E', flags=FLAGS_IC)
+    if 'E' not in fields:
+        xs(r'(?:^|\n)E\s+[A-Z][^\n]{0,50}\s([A-HJ-NPR-Z0-9]{17})\b', 'E')
+    if 'E' not in fields:
+        xs(r'\bE\s{1,15}([A-HJ-NPR-Z0-9]{17})\b', 'E')
+
+    # J: Fahrzeugklasse
+    xs(r'J\s+Fahrzeugklasse\s+([A-Z]\d)\b', 'J')
+    if 'J' not in fields:
+        xs(r'(?:^|\n)J\s+([A-Z]\d)\b', 'J')
+    if 'J' not in fields:
+        xs(r'\(4\)\s+([A-Z]\d)\b', 'J')
+
+    # F masės
+    xs(r'F\.?1\s+[A-Za-z][^\n]{0,40}\s(\d{4,6})\b', 'F1', flags=FLAGS_IC)
+    if 'F1' not in fields:
+        xs(r'(?:^|\n)F\.?1\s+(\d{4,6})\b', 'F1')
+    xs(r'F\.?2\s+[A-Za-z][^\n]{0,40}\s(\d{4,6})\b', 'F2', flags=FLAGS_IC)
+    if 'F2' not in fields:
+        xs(r'(?:^|\n)F\.?2\s+(\d{4,6})\b', 'F2')
+
+    # G: Leermasse
+    xs(r'(?:^|\n)G\s+(\d{3,6})\b', 'G')
+
+    # K: Typ-Genehmigungsnummer
+    xs(r'(?:^|\n)K\s+[A-Za-z][^\n]{0,50}\s(e\d\*[^\s]{5,40})', 'K', flags=FLAGS_IC)
+
+    # P: variklis
+    xs(r'P\.?1\s+Hubraum[^\n]{0,25}\s(\d{4,6})\b', 'P1', flags=FLAGS_IC)
+    if 'P1' not in fields:
+        xs(r'(?:^|\n)P\.?1\s+(\d{4,6})\b', 'P1')
+    xs(r'P\.?2\s+Nennleistung[^\n]{0,35}\s([\d/]+)\b', 'P2', flags=FLAGS_IC)
+    if 'P2' not in fields:
+        xs(r'(?:^|\n)P\.?2\s+([\d/]+)\b', 'P2')
+    xs(r'P\.?3\s+Kraftstoff\s+([A-Za-z]{3,15})\b', 'P3', flags=FLAGS_IC)
+    if 'P3' not in fields:
+        xs(r'(?:^|\n)P\.?3\s+([A-Za-z]{3,15})\b', 'P3')
+    if 'P3' not in fields:
+        xs(r'\b(Diesel|Benzin|Elektro|Hybrid)\b', 'P3', flags=FLAGS_IC)
+
+    # R: Farbe (tik eilutės pradžioje!)
+    xs(r'(?:^|\n)R\s+Farbe\s+([A-ZÄÖÜ][A-ZÄÖÜ]{2,15})\b', 'R')
+    if 'R' not in fields:
+        xs(r'(?:^|\n)R\s+([A-ZÄÖÜ][A-ZÄÖÜ]{2,15})\b', 'R')
+
+    # S, T
+    xs(r'(?:^|\n)S\.?1\s+[A-Za-z][^\n]{0,30}\s(\d{1,3})\b', 'S1', flags=FLAGS_IC)
+    if 'S1' not in fields:
+        xs(r'(?:^|\n)S\.?1\s+(\d{1,3})\b', 'S1')
+    xs(r'(?:^|\n)T\s+[A-Za-z][^\n]{0,30}\s(\d{2,3})\b', 'T', flags=FLAGS_IC)
+    if 'T' not in fields:
+        xs(r'(?:^|\n)T\s+(\d{2,3})\b', 'T')
+
+    # C: valdytojas / savininkas
+    # Teil II: C.3.1 = pavadinimas (C.1.1 atitikmuo), C.6.1 = savininkas (C.2.1 atitikmuo)
+    # Etiketė atskirta dviem tarpais nuo reikšmės; reikšmė gali turėti kabutes
+    _clean = lambda v: v.replace('"', '').strip()
+    xs(r'C\.?3\.?1\s+\S[^\n]{3,50}?\s{2,}(.{3,100}?)(?:\n|$)', 'C11', _clean, FLAGS_IC)
+    xs(r'C\.?6\.?1\s+\S[^\n]{3,50}?\s{2,}(.{3,100}?)(?:\n|$)', 'C21', _clean, FLAGS_IC)
+    xs(r'C\.?3\.?3\s+\S[^\n]{0,40}?\s{2,}([^\n]{3,100})', 'C13', _clean, FLAGS_IC)
+    if 'C13' not in fields:
+        xs(r'C\.?3\.?3\s+(?:Anschrift\s+)?([^\n]{3,100})', 'C13', _clean, FLAGS_IC)
+    xs(r'C\.?6\.?3\s+(?:Anschrift\s+)?([^\n]{3,100})', 'C23', _clean, FLAGS_IC)
+
+    return fields
+
+
+def parse_regitra_fields(text: str) -> Dict[str, Any]:
+    """
+    Universalus įėjimo taškas.
+    Automatiškai nustato dokumento šalį (LT / DE) ir
+    naudoja atitinkamą parserį.
+    """
+    country = detect_document_country(text)
+    logger.info("Dokumento šalis: {}".format(country))
+
+    # Apkarpyti 'Pastabos' / 'Definition der Felder' / 'Zur Beachtung' skyrių
+    # (antrasis puslapis su laukų aprašymais - ne duomenys)
+    stop_markers_lt = ["Pastabos", "PASTABOS", "valstybinis registracijos numeris",
+                       "pirmosios registracijos data"]
+    stop_markers_de = ["Definition der Felder", "Zur Beachtung", "Hinweis zu Feld"]
+
+    stop_markers = stop_markers_de if country == "de" else stop_markers_lt
+    data_text = text
+    for marker in stop_markers:
+        idx = text.find(marker)
+        if idx > 300:
+            data_text = text[:idx]
+            break
+
+    if country == "de":
+        fields = _parse_de_fields(data_text)
+    else:
+        fields = _parse_lt_fields(data_text)
+
+    logger.info("Atpažinti laukai: {}".format(list(fields.keys())))
     return fields
 
 # ---------------------------------------------------------------------------
@@ -231,8 +452,9 @@ def find_vins_in_text(text):
 def _get_tesseract_lang():
     try:
         langs = pytesseract.get_languages()
-        if "lit" in langs and "eng" in langs: return "lit+eng"
-        if "eng" in langs: return "eng"
+        selected = [l for l in ("lit", "deu", "fra", "pol", "lav", "est", "eng") if l in langs]
+        if selected:
+            return "+".join(selected)
         return langs[0] if langs else "eng"
     except: return "eng"
 
