@@ -629,7 +629,7 @@ async def extract_vins(
     file: UploadFile = File(...),
     only_valid: bool = Query(False),
     only_trucks: bool = Query(False),
-    engine: EngineEnum = Query(EngineEnum.tesseract, description="OCR variklis"),
+    engine: EngineEnum = Query(EngineEnum.google_vision, description="OCR variklis"),
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Reikalingas PDF failas")
@@ -668,7 +668,7 @@ def validate_single(vin: str):
 @app.post("/debug/ocr")
 async def debug_ocr(
     file: UploadFile = File(...),
-    engine: EngineEnum = Query(EngineEnum.tesseract, description="OCR variklis"),
+    engine: EngineEnum = Query(EngineEnum.google_vision, description="OCR variklis"),
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Reikalingas PDF failas")
