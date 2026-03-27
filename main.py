@@ -1,5 +1,6 @@
 """VIN Extractor API v3.0 - su pilnu laukų atpažinimu"""
 import re, io, logging, platform, os
+from enum import Enum
 from typing import Optional, List, Dict, Any, Tuple
 import pdfplumber, pytesseract
 from pdf2image import convert_from_bytes
@@ -258,6 +259,12 @@ def extract_text_with_google(pdf_bytes):
 
 AVAILABLE_ENGINES = ["auto", "pdfplumber", "google_vision", "tesseract"]
 
+class EngineEnum(str, Enum):
+    auto         = "auto"
+    pdfplumber   = "pdfplumber"
+    google_vision = "google_vision"
+    tesseract    = "tesseract"
+
 def _run_pdfplumber(pdf_bytes):
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         parts = [p.extract_text() for p in pdf.pages if p.extract_text()]
@@ -400,12 +407,10 @@ async def extract_vins(
     file: UploadFile = File(...),
     only_valid: bool = Query(False),
     only_trucks: bool = Query(False),
-    engine: str = Query("auto", description="OCR variklis: auto | pdfplumber | google_vision | tesseract"),
+    engine: EngineEnum = Query(EngineEnum.tesseract, description="OCR variklis"),
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Reikalingas PDF failas")
-    if engine not in AVAILABLE_ENGINES:
-        raise HTTPException(status_code=400, detail="Nežinomas variklis '{}'. Galimi: {}".format(engine, AVAILABLE_ENGINES))
     pdf_bytes = await file.read()
     if not pdf_bytes: raise HTTPException(status_code=400, detail="Tuscias failas")
     text, method = extract_text_from_pdf(pdf_bytes, engine=engine)
@@ -441,12 +446,10 @@ def validate_single(vin: str):
 @app.post("/debug/ocr")
 async def debug_ocr(
     file: UploadFile = File(...),
-    engine: str = Query("auto", description="OCR variklis: auto | pdfplumber | google_vision | tesseract"),
+    engine: EngineEnum = Query(EngineEnum.tesseract, description="OCR variklis"),
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Reikalingas PDF failas")
-    if engine not in AVAILABLE_ENGINES:
-        raise HTTPException(status_code=400, detail="Nežinomas variklis \'{}\'. Galimi: {}".format(engine, AVAILABLE_ENGINES))
     pdf_bytes = await file.read()
     text, method = extract_text_from_pdf(pdf_bytes, engine=engine)
     candidates = find_vins_in_text(text)
